@@ -1,0 +1,73 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# AnomX SOC 2026 — Local Redpanda Broker
+#
+# This file starts a single-node Redpanda broker suitable for local development
+# and testing. It is NOT a production configuration.
+#
+# Usage:
+#   docker compose up -d        # start in background
+#   docker compose ps           # check status
+#   docker compose down         # stop and remove
+#
+# Redpanda is a Kafka-compatible broker. All Python code written for
+# kafka-python works identically with this broker.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  redpanda:
+    # Redpanda v23.3 — stable, widely used version
+    image: docker.redpanda.com/redpandadata/redpanda:v23.3.9
+
+    # Name the container so we can reference it in rpk commands
+    container_name: redpanda-1
+
+    # Run Redpanda in developer mode (single-node, no external ZooKeeper)
+    command:
+      - redpanda
+      - start
+      - --node-id=0
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda-1:9092,external://localhost:19092
+      - --schema-registry-addr=internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr=redpanda-1:33145
+      - --advertise-rpc-addr=redpanda-1:33145
+      - --mode=dev-container
+      - --smp=1                        # use a single CPU core
+      - --default-log-level=warn       # reduce log noise
+
+    ports:
+      # Kafka API (used by kafka-python and confluent-kafka)
+      - "9092:9092"
+      # External Kafka API (used when connecting from outside Docker)
+      - "19092:19092"
+      # Schema Registry (not used in this project, but available)
+      - "18081:18081"
+      # Redpanda Admin API
+      - "9644:9644"
+
+    # Health check — wait until Redpanda is ready before consumers try to connect
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster info || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ─── Redpanda Console (optional web UI) ────────────────────────────────────
+  # Uncomment this section if you want a browser-based topic explorer
+  # at http://localhost:8080
+  #
+  # console:
+  #   image: docker.redpanda.com/redpandadata/console:v2.4.3
+  #   container_name: redpanda-console
+  #   depends_on:
+  #     redpanda:
+  #       condition: service_healthy
+  #   ports:
+  #     - "8080:8080"
+  #   environment:
+  #     KAFKA_BROKERS: redpanda-1:9092
+
+# Note: No persistent volumes are defined here.
+# All data is lost when you run 'docker compose down'.
+# This is intentional — each session starts fresh.

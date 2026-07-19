@@ -1,0 +1,11 @@
+fastapi==0.111.0
+uvicorn==0.29.0
+pydantic==2.13.0
+kafka-python==1.4.7
+requests==2.31.0
+pandas==2.2.3
+numpy==2.2.6
+scikit-learn==1.7.2
+torch==2.13.0
+joblib==1.5.3
+PyYAML==6.0.3
