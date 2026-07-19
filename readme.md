@@ -19,9 +19,7 @@ attached to every alert.
 4. [Setup](#4-setup)
 5. [Configuration](#5-configuration)
 6. [How to Run](#6-how-to-run)
-7. [Sample Output](#7-sample-output)
-8. [Key Design Decisions](#8-key-design-decisions)
-9. [Known Limitations](#9-known-limitations)
+7. [Key Design Decisions](#8-key-design-decisions)
 
 ---
 
@@ -256,54 +254,6 @@ Sends a handful of hand-crafted example events (normal and anomalous) straight t
 ```bash
 docker compose down
 ```
-
----
-
-## 7. Sample Output
-
-The examples below are **real output from running `ForexGuardScorer.score()` against actual
-events in the dataset** — not illustrative/hand-written examples. Both the streaming consumer
-and the `POST /score` API return this exact structure (`scorer.py`'s output matches
-`ScoreResponse` in `schemas.py` field-for-field).
-
-**A flagged event, with one of the six specifically-mapped reasons:**
-```json
-{
-  "user_id": "USER_0000",
-  "event_id": "EVT_742686",
-  "event_type": "trade",
-  "timestamp": "2024-03-05 05:56:13",
-  "anomaly_score": 87.400,
-  "lstm_score": 87.400,
-  "is_anomaly": true,
-  "severity": "CRITICAL",
-  "verdict": "🚨 ANOMALY",
-  "reasons": ["Unexpected profit/loss pattern"],
-  "top_features": [
-    {"feature": "lot_size", "raw_value": 49.63, "scaled_value": 84.16},
-    {"feature": "roll_5_trade_vol_std", "raw_value": 90626.41, "scaled_value": 50.84},
-    {"feature": "pnl", "raw_value": 4748.27, "scaled_value": 40.28}
-  ]
-}
-```
-
-**⚠️ Note on reasons, confirmed by actually running the scorer across ~5,900 events:** only
-**~47% of flagged events** get one of the six specifically-mapped reasons above (`amount`,
-`withdrawal_to_deposit_ratio`, `pnl`, `login_success`, `failed_attempts`,
-`burst_count_5min`). The other **~53%** fall back to the generic explanation, because their
-top contributing feature isn't one of those six exact names — for example:
-```json
-{
-  "reasons": ["Behavior deviates from historical pattern"],
-  "top_features": [
-    {"feature": "margin_used", "raw_value": 177379.34, "scaled_value": 119.52},
-    {"feature": "lot_size", "raw_value": 39.76, "scaled_value": 67.31}
-  ]
-}
-```
-This is a known gap, tracked in [Section 9](#9-known-limitations) — `_explain()` in
-`scorer.py` doesn't yet cover features like `margin_used`, `lot_size`, or the rolling-window
-columns, which show up as top contributors more often than the six it currently handles.
 
 ---
 
