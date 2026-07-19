@@ -1,232 +1,144 @@
-# AnomX — Real-Time Trader Behavior Anomaly Detection Engine
+# AnomX — Real-Time Trader Anomaly Detection Engine
 
-> Summer of Code 2026 • IIT Bombay
+**Summer of Code 2026 | IIT Bombay**
 
-AnomX is a real-time anomaly detection engine for forex trading platforms. It detects suspicious trader behaviour by learning normal user activity from historical events and scoring incoming events in real time using unsupervised machine learning.
+AnomX is a real-time anomaly detection system for forex trading platforms. It detects suspicious trader behaviour from streaming events using unsupervised machine learning and exposes the same inference engine through both a streaming consumer and a REST API.
 
-The project simulates an end-to-end production pipeline—from synthetic data generation and feature engineering to model training, event streaming, and online inference through a REST API.
-
----
-
-## Features
-
-- Synthetic forex trading dataset generator with configurable fraud injection
-- Behavioural feature engineering pipeline
-- Isolation Forest for point anomaly detection
-- LSTM Autoencoder for sequential anomaly detection
-- Real-time event streaming using Redpanda (Kafka API)
-- FastAPI inference service
-- Human-readable anomaly explanations
-- Modular architecture with configurable pipeline
+> **Additional documentation**
+>
+> - `RUN.md` – concise execution commands
+> - `model_notes.md` – model comparison, evaluation metrics and implementation notes
 
 ---
 
-# Project Architecture
+# Table of Contents
 
-```
-                          Synthetic Data Generator
-                                     │
-                                     ▼
-                              Raw Events Dataset
-                                     │
-                                     ▼
-                          Feature Engineering Pipeline
-                                     │
-                                     ▼
-                            Engineered Features
-                                     │
-                    ┌────────────────┴────────────────┐
-                    ▼                                 ▼
-          Isolation Forest                 LSTM Autoencoder
-                    │                                 │
-                    └──────────────┬──────────────────┘
-                                   ▼
-                           Saved Model Artifacts
-                                   │
-              ┌────────────────────┴───────────────────┐
-              ▼                                        ▼
-      Streaming Consumer                      FastAPI Server
-              │                                        │
-              └──────────────► ForexGuardScorer ◄──────┘
-                                   │
-                                   ▼
-                      Human-readable Anomaly Alerts
-```
+1. Overview
+2. Architecture
+3. Repository Structure
+4. Prerequisites
+5. Installation
+6. Configuration
+7. Running the Project
+8. API
+9. Sample Workflow
+10. Design Decisions
+11. Limitations
 
 ---
 
-# Repository Structure
+# 1. Overview
 
+The project simulates a production-style fraud detection pipeline.
+
+Instead of relying on manually written rules, AnomX learns normal user behaviour from historical trading events and scores every incoming event against that baseline.
+
+The pipeline consists of five stages:
+
+1. Generate synthetic forex events.
+2. Engineer behavioural features.
+3. Train anomaly detection models.
+4. Stream events through Redpanda.
+5. Score events in real time.
+
+Training is performed offline. During inference, previously trained models are loaded once and reused for all predictions.
+
+---
+
+# 2. Architecture
+
+```text
+                 Synthetic Event Generation
+                           │
+                           ▼
+                  data/raw/events.csv
+                           │
+                           ▼
+                  Feature Engineering
+                           │
+                           ▼
+             data/processed/features.csv
+                           │
+            ┌──────────────┴──────────────┐
+            ▼                             ▼
+    Isolation Forest              LSTM Autoencoder
+            │                             │
+            └──────────────┬──────────────┘
+                           ▼
+                  Saved Model Artifacts
+                           │
+          ┌────────────────┴────────────────┐
+          ▼                                 ▼
+     consumer.py                     FastAPI (main.py)
+          │                                 │
+          └──────────────► ForexGuardScorer ◄──────────────┘
+                           │
+                           ▼
+                    Anomaly Alerts
 ```
-AnomX/
+
+### Architecture Notes
+
+- Dataset generation, feature engineering and model training are completely offline.
+- Both the streaming consumer and FastAPI server use the same `ForexGuardScorer` implementation to ensure identical scoring logic.
+- Redpanda is used as the message broker to simulate a real event stream.
+
+---
+
+# 3. Repository Structure
+
+```text
+.
+├── README.md
+├── RUN.md
+├── model_notes.md
+├── requirements.txt
+├── docker-compose.yml
 │
 ├── configs/
 │   └── config.yaml
 │
 ├── data/
-│   ├── raw/
-│   ├── processed/
 │   ├── generate_events.py
-│   └── feature_engineering.py
+│   ├── feature_engineering.py
+│   ├── raw/                 # generated dataset
+│   └── processed/           # engineered features
 │
 ├── models/
 │   ├── isolation_forest.py
 │   ├── lstm_autoencoder.py
 │   ├── scorer.py
-│   └── trained/
+│   └── trained/             # generated model artifacts
 │
 ├── notebook/
 │
 ├── producer.py
 ├── consumer.py
 ├── stream_config.py
-│
 ├── main.py
 ├── schemas.py
-│
-├── docker-compose.yml
-├── requirements.txt
-├── RUN.md
-└── README.md
+├── test_client.py
+└── utils/
 ```
 
 ---
 
-# Dataset
+# 4. Prerequisites
 
-The project generates a synthetic forex trading dataset consisting of user activities such as
+- Python 3.10 or 3.11
+- Docker Desktop (or Docker Engine)
+- Git
 
-- Login
-- Trade
-- Deposit
-- Withdrawal
-- Session
-- KYC Updates
-
-Each user is assigned a behavioural profile, and a configurable fraction of users are injected with realistic fraud scenarios.
-
-Implemented anomaly scenarios include:
-
-- IP hopping
-- Wash trading
-- Deposit–withdrawal cycling
-- Bot trading
-- Structuring
-- Brute-force login attacks
-- Dormant account withdrawals
-- Consistent winning behaviour
-- Device switching
-- Suspicious KYC manipulation
+> Python 3.12 is currently not recommended because `kafka-python==1.4.7` is incompatible.
 
 ---
 
-# Feature Engineering
-
-The feature engineering pipeline converts raw events into behavioural features suitable for anomaly detection.
-
-Examples include
-
-### Temporal Features
-
-- Time since previous event
-- Time since previous login
-- Time since previous deposit
-
-### Rolling Statistics
-
-- Rolling trade volume
-- Rolling PnL
-- Rolling click rate
-
-### Login Behaviour
-
-- Unique IPs
-- Unique countries
-- Unique devices
-- Rolling failed login attempts
-
-### Financial Behaviour
-
-- Rolling deposit totals
-- Withdrawal-to-deposit ratio
-
-### Burst Detection
-
-- Events in last 5 minutes
-- Events in last 30 minutes
-
-### Behaviour Deviation
-
-- User-specific z-scores
-- Session statistics
-
----
-
-# Machine Learning Models
-
-## Isolation Forest
-
-Used to identify point anomalies by isolating observations that significantly differ from normal behaviour.
-
----
-
-## LSTM Autoencoder
-
-Learns sequences of normal user behaviour and detects anomalies using reconstruction error.
-
-The LSTM Autoencoder powers the live inference pipeline because behavioural fraud is often expressed as suspicious sequences of otherwise legitimate actions.
-
----
-
-# Streaming Pipeline
-
-Producer
-
-- Reads engineered feature dataset
-- Publishes events to Redpanda
-
-Consumer
-
-- Subscribes to streaming events
-- Loads trained models
-- Scores every incoming event
-- Produces anomaly explanations
-
-The streaming consumer and REST API both use the same scoring engine to ensure consistent predictions.
-
----
-
-# REST API
-
-The project exposes a FastAPI application.
-
-### Health Check
-
-```
-GET /health
-```
-
-### Score Event
-
-```
-POST /score
-```
-
-Returns
-
-- anomaly prediction
-- anomaly score
-- severity
-- explanation
-
----
-
-# Installation
+# 5. Installation
 
 Clone the repository
 
 ```bash
-git clone https://github.com/<your-username>/anomx.git
+git clone <repository-url>
 cd anomx
 ```
 
@@ -236,12 +148,12 @@ Create a virtual environment
 python -m venv .venv
 ```
 
-Activate
+Activate it
 
 Windows
 
 ```powershell
-.venv\Scripts\activate
+.\.venv\Scripts\Activate.ps1
 ```
 
 Linux/macOS
@@ -256,27 +168,68 @@ Install dependencies
 pip install -r requirements.txt
 ```
 
+Verify installation
+
+```bash
+python -c "import fastapi, torch, sklearn; print('Environment OK')"
+```
+
 ---
 
-# Running the Project
+# 6. Configuration
 
-## 1. Generate synthetic dataset
+Project configuration is centralized in
+
+```text
+configs/config.yaml
+```
+
+Important settings include:
+
+- dataset size
+- number of simulated users
+- anomaly fraction
+- rolling-window sizes
+- model hyperparameters
+- streaming configuration
+
+Any changes to these values should be made before regenerating the dataset or retraining the models.
+
+---
+
+# 7. Running the Project
+
+## Step 1 — Generate synthetic events (optional)
+
+Skip this step if generated data is already included.
 
 ```bash
 python data/generate_events.py
 ```
 
+Output:
+
+```text
+data/raw/events.csv
+```
+
 ---
 
-## 2. Generate engineered features
+## Step 2 — Build engineered features (optional)
 
 ```bash
 python data/feature_engineering.py
 ```
 
+Output:
+
+```text
+data/processed/features.csv
+```
+
 ---
 
-## 3. Train models
+## Step 3 — Train models (optional)
 
 Isolation Forest
 
@@ -290,31 +243,41 @@ LSTM Autoencoder
 python models/lstm_autoencoder.py
 ```
 
----
+Trained models are saved under
 
-## 4. Start Redpanda
-
-```bash
-docker compose up
+```text
+models/trained/
 ```
 
 ---
 
-## 5. Start FastAPI
+## Step 4 — Start Redpanda
+
+```bash
+docker compose up -d
+```
+
+Verify that the broker is running before continuing.
+
+---
+
+## Step 5 — Start the API
 
 ```bash
 uvicorn main:app --reload
 ```
 
-Swagger UI
+Swagger UI:
 
-```
-http://localhost:8000/docs
+```text
+http://127.0.0.1:8000/docs
 ```
 
 ---
 
-## 6. Start Streaming Demo
+## Step 6 — Run the streaming pipeline
+
+Open two terminals.
 
 Producer
 
@@ -328,59 +291,98 @@ Consumer
 python consumer.py
 ```
 
+The producer publishes engineered events to Redpanda.
+
+The consumer reads each event, scores it using the trained models, and prints anomaly alerts.
+
 ---
 
-# Configuration
+## Step 7 — Test the API (optional)
 
-Most project parameters are configurable through
+```bash
+python test_client.py
+```
+
+---
+
+## Step 8 — Stop services
+
+```bash
+docker compose down
+```
+
+---
+
+# 8. API
+
+## Health
 
 ```
-configs/config.yaml
+GET /health
 ```
 
-This includes
+## Score
 
-- dataset size
-- random seed
-- anomaly fraction
-- rolling window sizes
-- model hyperparameters
-- streaming configuration
+```
+POST /score
+```
 
----
-
-# Tech Stack
-
-| Category | Tools |
-|-----------|------|
-| Language | Python |
-| ML | Scikit-learn, PyTorch |
-| Data | Pandas, NumPy |
-| API | FastAPI |
-| Streaming | Redpanda / Kafka |
-| Containerisation | Docker |
-| Configuration | YAML |
+The API loads the trained models during startup and returns anomaly predictions together with severity and explanation.
 
 ---
 
-# Future Improvements
+# 9. Sample Workflow
 
-- Online learning
-- SHAP-based explanations
-- Ensemble anomaly scoring
-- Dashboard for live monitoring
-- Graph-based fraud detection
-- Real trading data integration
+```
+generate_events.py
+        │
+        ▼
+events.csv
+        │
+        ▼
+feature_engineering.py
+        │
+        ▼
+features.csv
+        │
+        ▼
+Train Models
+        │
+        ▼
+Start Redpanda
+        │
+        ▼
+Run producer.py
+        │
+        ▼
+Run consumer.py
+        │
+        ▼
+Receive anomaly alerts
+```
 
 ---
 
-# Documentation
+# 10. Design Decisions
 
-- `RUN.md` – Detailed execution guide
-- `model.md` – Model selection and implementation notes
+- Training and inference are separated to keep deployed models reproducible.
+- The same scoring engine is shared between streaming inference and the REST API.
+- The LSTM Autoencoder is used for live inference because it models behavioural sequences rather than isolated events.
+- Configuration values are centralized in `configs/config.yaml`.
+
+Further implementation details and evaluation results are available in `model_notes.md`.
 
 ---
 
-# License
+# 11. Current Limitations
 
-Developed as part of the IIT Bombay Summer of Code 2026 programme.
+- Python 3.12 is not supported with the current Kafka client.
+- The dataset is synthetically generated.
+- Explanation mapping currently covers only a subset of engineered features.
+- Model retraining is offline; online learning is not implemented.
+
+---
+
+## License
+
+Developed as part of IIT Bombay Summer of Code 2026.
