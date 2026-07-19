@@ -6,10 +6,6 @@ A real-time system that watches trader behavior event-by-event and flags fraud a
 unusual logins, wash trading, deposit/withdrawal cycling, and more — with a plain-English reason
 attached to every alert.
 
-> 📄 For the full model comparison (real ROC-AUC/precision numbers, per-anomaly-type breakdown,
-> and threshold justification), see **[`model_notes.md`](./model_notes.md)**.
-> For condensed copy-paste run commands, see **[`RUN.md`](./RUN.md)**.
-
 ---
 
 ## Table of Contents
