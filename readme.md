@@ -1,369 +1,313 @@
 # AnomX — Real-Time Trader Anomaly Detection Engine
 
-**Summer of Code 2026 | IIT Bombay**
+**AnomX SOC 2026 | Final Project | ForexGuard Prototype**
 
-AnomX is a real-time anomaly detection system for forex trading platforms. It detects suspicious trader behaviour from streaming events using unsupervised machine learning and exposes the same inference engine through both a streaming consumer and a REST API.
+A real-time system that watches trader behavior event-by-event and flags fraud as it happens —
+unusual logins, wash trading, deposit/withdrawal cycling, and more — with a plain-English reason
+attached to every alert.
 
-> **Additional documentation**
->
-> - `RUN.md` – concise execution commands
-> - `model_notes.md` – model comparison, evaluation metrics and implementation notes
-
----
-
-# Table of Contents
-
-1. Overview
-2. Architecture
-3. Repository Structure
-4. Prerequisites
-5. Installation
-6. Configuration
-7. Running the Project
-8. API
-9. Sample Workflow
-10. Design Decisions
-11. Limitations
+> 📄 For the full model comparison (real ROC-AUC/precision numbers, per-anomaly-type breakdown,
+> and threshold justification), see **[`model_notes.md`](./model_notes.md)**.
+> For condensed copy-paste run commands, see **[`RUN.md`](./RUN.md)**.
 
 ---
 
-# 1. Overview
-
-The project simulates a production-style fraud detection pipeline.
-
-Instead of relying on manually written rules, AnomX learns normal user behaviour from historical trading events and scores every incoming event against that baseline.
-
-The pipeline consists of five stages:
-
-1. Generate synthetic forex events.
-2. Engineer behavioural features.
-3. Train anomaly detection models.
-4. Stream events through Redpanda.
-5. Score events in real time.
-
-Training is performed offline. During inference, previously trained models are loaded once and reused for all predictions.
+## Table of Contents
+1. [Problem & Approach](#1-problem--approach)
+2. [Architecture](#2-architecture)
+3. [Repository Structure](#3-repository-structure)
+4. [Setup](#4-setup)
+5. [Configuration](#5-configuration)
+6. [How to Run](#6-how-to-run)
+7. [Sample Output](#7-sample-output)
+8. [Key Design Decisions](#8-key-design-decisions)
+9. [Known Limitations](#9-known-limitations)
 
 ---
 
-# 2. Architecture
+## 1. Problem & Approach
 
-```text
-                 Synthetic Event Generation
-                           │
-                           ▼
-                  data/raw/events.csv
-                           │
-                           ▼
-                  Feature Engineering
-                           │
-                           ▼
-             data/processed/features.csv
-                           │
-            ┌──────────────┴──────────────┐
-            ▼                             ▼
-    Isolation Forest              LSTM Autoencoder
-            │                             │
-            └──────────────┬──────────────┘
-                           ▼
-                  Saved Model Artifacts
-                           │
-          ┌────────────────┴────────────────┐
-          ▼                                 ▼
-     consumer.py                     FastAPI (main.py)
-          │                                 │
-          └──────────────► ForexGuardScorer ◄──────────────┘
-                           │
-                           ▼
-                    Anomaly Alerts
+At a forex brokerage, hundreds of events happen every second — logins, deposits, trades,
+withdrawals, failed login attempts. Almost all of it is normal. Buried in that noise are a
+small number of events that aren't: a login from a new country right after a deposit, a burst
+of failed logins, a trade far bigger than anything that user has ever placed before. A human
+analyst can't watch every event by hand, and simple threshold rules ("flag withdrawals over
+$50k") are easy to game and produce too many false positives.
+
+AnomX takes a different approach: it learns what *normal* looks like per user, from historical
+behavior, without ever being told in advance which events are fraudulent (unsupervised
+learning — see [Section 8.1](#81-why-unsupervised)). It then scores every new event in real
+time against that learned notion of normal, and produces a human-readable alert — with a
+severity level and specific reasons — whenever something deviates enough to matter.
+
+---
+
+## 2. Architecture
+
+The system is built in five layers, each one feeding the next:
+
+```
+┌──────────────────────┐     ┌───────────────────────┐     ┌───────────────────────────┐
+│   1. Synthetic Data   │────▶│  2. Feature Engineering │────▶│   3. Model Training        │
+│  generate_events.py   │     │  feature_engineering.py │     │  isolation_forest.py       │
+│  → data/raw/events.csv│     │  → data/processed/       │     │  lstm_autoencoder.py       │
+│                       │     │     features.csv         │     │  → models/trained/*.pkl/.pt│
+└──────────────────────┘     └───────────────────────┘     └────────────┬──────────────┘
+                                                                          │
+                                                                          ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                              4. Live Serving Layer                                   │
+│                                                                                       │
+│   producer.py  ──publishes JSON events──▶  Redpanda broker (Docker, topic:           │
+│   (reads features.csv,                      "anomx-events")                          │
+│    replays it like a live feed)                        │                              │
+│                                                          ▼                              │
+│                                              consumer.py  ──uses──▶  ForexGuardScorer  │
+│                                              (subscribes to topic,     (models/scorer.py)│
+│                                               prints alerts to        loads LSTM model   │
+│                                               the terminal)           once at startup    │
+│                                                                                       │
+│   Separately, any client can also call:                                             │
+│                                              main.py (FastAPI)                        │
+│                                              POST /score   → same ForexGuardScorer     │
+│                                              GET  /health                              │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Architecture Notes
+**Why it's built this way:**
 
-- Dataset generation, feature engineering and model training are completely offline.
-- Both the streaming consumer and FastAPI server use the same `ForexGuardScorer` implementation to ensure identical scoring logic.
-- Redpanda is used as the message broker to simulate a real event stream.
+- **Training is offline and frozen, not live.** Models train once on historical
+  `features.csv`, get saved to disk (`.pkl` / `.pt`), and the live system only ever *loads*
+  those frozen artifacts — it never retrains on the fly. This means every scoring decision is
+  traceable to a specific, fixed model version, which matters in a compliance context.
+- **A message broker sits in the middle of serving**, rather than calling the model in a
+  simple loop, because that's the honest shape of the real problem: trading platforms hand you
+  a continuous stream, not a static file. `producer.py` replays `features.csv` row-by-row with
+  a configurable delay to simulate that stream.
+- **The streaming consumer and the FastAPI app call the exact same `ForexGuardScorer`
+  class.** Two independent copies of the scoring logic would eventually drift out of sync with
+  each other — there's a single source of truth for "what counts as anomalous."
 
 ---
 
-# 3. Repository Structure
+## 3. Repository Structure
 
-```text
+```
 .
-├── README.md
-├── RUN.md
-├── model_notes.md
-├── requirements.txt
-├── docker-compose.yml
+├── README.md                     ← this file
+├── model_notes.md                ← full model comparison, with real computed numbers
+├── RUN.md                        ← condensed run commands
+├── docker-compose.yml            ← starts a local single-node Redpanda broker
+├── requirements.txt               ← pinned Python dependencies
+├── .gitignore
 │
 ├── configs/
-│   └── config.yaml
+│   └── config.yaml                ← every tunable number (dataset size, model
+│                                     hyperparameters, rolling windows, streaming delay)
 │
 ├── data/
-│   ├── generate_events.py
-│   ├── feature_engineering.py
-│   ├── raw/                 # generated dataset
-│   └── processed/           # engineered features
+│   ├── generate_events.py         ← builds the synthetic dataset
+│   ├── feature_engineering.py     ← raw events → ML-ready features
+│   ├── raw/events.csv             ← synthetic dataset (~50,000 events, 500 users)
+│   └── processed/
+│       ├── features.csv
+│       └── features_with_scores.csv
 │
 ├── models/
-│   ├── isolation_forest.py
-│   ├── lstm_autoencoder.py
-│   ├── scorer.py
-│   └── trained/             # generated model artifacts
+│   ├── isolation_forest.py        ← trains/evaluates the Isolation Forest
+│   ├── lstm_autoencoder.py        ← trains/evaluates the LSTM Autoencoder
+│   ├── scorer.py                  ← ForexGuardScorer — scores a live event, builds an alert
+│   └── trained/                   ← frozen, saved model files
+│       ├── isolation_forest.pkl
+│       ├── lstm_autoencoder.pt
+│       ├── lstm_scaler.pkl
+│       └── lstm_threshold.pkl
 │
 ├── notebook/
+│   └── isolation_forest_hyperparam_search.ipynb
 │
-├── producer.py
-├── consumer.py
-├── stream_config.py
-├── main.py
-├── schemas.py
-├── test_client.py
+├── stream_config.py               ← shared broker address / topic / paths for producer+consumer
+├── producer.py                    ← replays features.csv onto the Redpanda topic
+├── consumer.py                    ← subscribes to the topic, scores events, prints alerts
+│
+├── main.py                        ← FastAPI app: GET /health, POST /score
+├── schemas.py                     ← Pydantic request/response models
+├── test_client.py                 ← sends sample events to the running API
 └── utils/
+    ├── logger.py
+    └── helpers.py
 ```
 
 ---
 
-# 4. Prerequisites
+## 4. Setup
 
-- Python 3.10 or 3.11
-- Docker Desktop (or Docker Engine)
-- Git
+**Prerequisites:**
+- Python **3.10 or 3.11** (see [Known Limitations](#9-known-limitations) re: 3.12+)
+- Docker Desktop (or Docker Engine on Linux)
+- ~500 MB free disk space
 
-> Python 3.12 is currently not recommended because `kafka-python==1.4.7` is incompatible.
-
----
-
-# 5. Installation
-
-Clone the repository
+**Install steps** (run from the project root):
 
 ```bash
-git clone <repository-url>
-cd anomx
-```
-
-Create a virtual environment
-
-```bash
+# 1. Create and activate a virtual environment
 python -m venv .venv
-```
 
-Activate it
-
-Windows
-
-```powershell
+# Windows (PowerShell)
 .\.venv\Scripts\Activate.ps1
-```
-
-Linux/macOS
-
-```bash
+# macOS / Linux
 source .venv/bin/activate
-```
 
-Install dependencies
-
-```bash
+# 2. Install dependencies
 pip install -r requirements.txt
 ```
 
-Verify installation
-
+Verify the install:
 ```bash
-python -c "import fastapi, torch, sklearn; print('Environment OK')"
+python -c "import fastapi, torch, sklearn, kafka; print('OK')"
 ```
 
 ---
 
-# 6. Configuration
+## 5. Configuration
 
-Project configuration is centralized in
+All tunable values live in **`configs/config.yaml`** — nothing is hardcoded elsewhere. Notable
+settings:
 
-```text
-configs/config.yaml
-```
+| Key | Value | What it controls |
+|---|---|---|
+| `data.n_events` | 50000 | Size of the synthetic dataset |
+| `data.n_users` | 500 | Number of simulated users |
+| `data.anomaly_fraction` | 0.05 | Fraction of users with an injected fraud pattern |
+| `features.rolling_windows` | [5, 10, 30] | Rolling-window sizes for feature engineering |
+| `model.isolation_forest.contamination` | 0.013 | Expected outlier fraction (see [8.2](#82-isolation-forest-contamination--0013)) |
+| `model.lstm_autoencoder.sequence_length` | 10 | Events per sequence the LSTM looks at |
+| `model.lstm_autoencoder.threshold_percentile` | 98 | Anomaly cutoff (see [8.3](#83-lstm-anomaly-threshold--98th-percentile)) |
+| `streaming.delay_seconds` | 0.1 | Delay between events the producer publishes |
 
-Important settings include:
-
-- dataset size
-- number of simulated users
-- anomaly fraction
-- rolling-window sizes
-- model hyperparameters
-- streaming configuration
-
-Any changes to these values should be made before regenerating the dataset or retraining the models.
-
----
-
-# 7. Running the Project
-
-## Step 1 — Generate synthetic events (optional)
-
-Skip this step if generated data is already included.
-
-```bash
-python data/generate_events.py
-```
-
-Output:
-
-```text
-data/raw/events.csv
-```
+To regenerate data or retrain a model with different settings, edit this file first — every
+downstream script reads from it, so there's one place to change a value.
 
 ---
 
-## Step 2 — Build engineered features (optional)
+## 6. How to Run
 
+The trained models and processed data are already included in this submission, so **Steps 1–2
+below can be skipped** unless you want to regenerate everything from scratch.
+
+### Step 1 (optional) — Regenerate the dataset and features
 ```bash
-python data/feature_engineering.py
+python data/generate_events.py          # → data/raw/events.csv
+python data/feature_engineering.py      # → data/processed/features.csv
 ```
 
-Output:
-
-```text
-data/processed/features.csv
-```
-
----
-
-## Step 3 — Train models (optional)
-
-Isolation Forest
-
+### Step 2 (optional) — Retrain the models
 ```bash
-python models/isolation_forest.py
+python models/isolation_forest.py       # trains + evaluates Isolation Forest
+python models/lstm_autoencoder.py       # trains + evaluates LSTM Autoencoder
 ```
+Each script prints an evaluation report (ROC-AUC, Average Precision, confusion matrix) as it
+runs.
 
-LSTM Autoencoder
-
-```bash
-python models/lstm_autoencoder.py
-```
-
-Trained models are saved under
-
-```text
-models/trained/
-```
-
----
-
-## Step 4 — Start Redpanda
-
+### Step 3 — Start the message broker
 ```bash
 docker compose up -d
+docker compose ps        # confirm the "redpanda" service is healthy before continuing
 ```
 
-Verify that the broker is running before continuing.
-
----
-
-## Step 5 — Start the API
-
+### Step 4 — Start the API
 ```bash
-uvicorn main:app --reload
+uvicorn main:app --host 127.0.0.1 --port 8000
 ```
+Open **http://127.0.0.1:8000/docs** — FastAPI's interactive docs page, generated from
+`schemas.py`, with a "Try it out" button for `GET /health` and `POST /score`.
 
-Swagger UI:
-
-```text
-http://127.0.0.1:8000/docs
-```
-
----
-
-## Step 6 — Run the streaming pipeline
-
-Open two terminals.
-
-Producer
-
+Quick check:
 ```bash
-python producer.py
+curl http://127.0.0.1:8000/health
+# → {"status":"ok","model_loaded":true}
 ```
 
-Consumer
+### Step 5 — Run the live streaming demo
+Open **two terminals**.
 
+**Terminal 1 — producer** (simulates events arriving live):
+```bash
+python producer.py --max 500 --delay 0.05
+```
+
+**Terminal 2 — consumer** (watches the stream and scores each event):
 ```bash
 python consumer.py
 ```
 
-The producer publishes engineered events to Redpanda.
+Within a few seconds you should see the consumer print an alert whenever an anomalous event
+streams past — see [Section 7](#7-sample-output) for what that looks like. Press `Ctrl+C` in
+the consumer terminal to stop.
 
-The consumer reads each event, scores it using the trained models, and prints anomaly alerts.
-
----
-
-## Step 7 — Test the API (optional)
-
+### Step 6 (optional) — Exercise the API directly
 ```bash
 python test_client.py
 ```
+Sends a handful of hand-crafted example events (normal and anomalous) straight to `POST
+/score` and prints the responses, without needing Postman or manual `curl` commands.
 
----
-
-## Step 8 — Stop services
-
+### Step 7 — Shut down
 ```bash
 docker compose down
 ```
 
 ---
 
-# 8. API
+## 7. Sample Output
 
-## Health
+The examples below are **real output from running `ForexGuardScorer.score()` against actual
+events in the dataset** — not illustrative/hand-written examples. Both the streaming consumer
+and the `POST /score` API return this exact structure (`scorer.py`'s output matches
+`ScoreResponse` in `schemas.py` field-for-field).
 
+**A flagged event, with one of the six specifically-mapped reasons:**
+```json
+{
+  "user_id": "USER_0000",
+  "event_id": "EVT_742686",
+  "event_type": "trade",
+  "timestamp": "2024-03-05 05:56:13",
+  "anomaly_score": 87.400,
+  "lstm_score": 87.400,
+  "is_anomaly": true,
+  "severity": "CRITICAL",
+  "verdict": "🚨 ANOMALY",
+  "reasons": ["Unexpected profit/loss pattern"],
+  "top_features": [
+    {"feature": "lot_size", "raw_value": 49.63, "scaled_value": 84.16},
+    {"feature": "roll_5_trade_vol_std", "raw_value": 90626.41, "scaled_value": 50.84},
+    {"feature": "pnl", "raw_value": 4748.27, "scaled_value": 40.28}
+  ]
+}
 ```
-GET /health
-```
 
-## Score
-
+**⚠️ Note on reasons, confirmed by actually running the scorer across ~5,900 events:** only
+**~47% of flagged events** get one of the six specifically-mapped reasons above (`amount`,
+`withdrawal_to_deposit_ratio`, `pnl`, `login_success`, `failed_attempts`,
+`burst_count_5min`). The other **~53%** fall back to the generic explanation, because their
+top contributing feature isn't one of those six exact names — for example:
+```json
+{
+  "reasons": ["Behavior deviates from historical pattern"],
+  "top_features": [
+    {"feature": "margin_used", "raw_value": 177379.34, "scaled_value": 119.52},
+    {"feature": "lot_size", "raw_value": 39.76, "scaled_value": 67.31}
+  ]
+}
 ```
-POST /score
-```
-
-The API loads the trained models during startup and returns anomaly predictions together with severity and explanation.
+This is a known gap, tracked in [Section 9](#9-known-limitations) — `_explain()` in
+`scorer.py` doesn't yet cover features like `margin_used`, `lot_size`, or the rolling-window
+columns, which show up as top contributors more often than the six it currently handles.
 
 ---
 
-# 9. Sample Workflow
-
-```
-generate_events.py
-        │
-        ▼
-events.csv
-        │
-        ▼
-feature_engineering.py
-        │
-        ▼
-features.csv
-        │
-        ▼
-Train Models
-        │
-        ▼
-Start Redpanda
-        │
-        ▼
-Run producer.py
-        │
-        ▼
-Run consumer.py
-        │
-        ▼
-Receive anomaly alerts
-```
-
----
-
-# 10. Design Decisions
+## 8. Key Design Decisions
 
 - Training and inference are separated to keep deployed models reproducible.
 - The same scoring engine is shared between streaming inference and the REST API.
@@ -374,15 +318,4 @@ Further implementation details and evaluation results are available in `model_no
 
 ---
 
-# 11. Current Limitations
-
-- Python 3.12 is not supported with the current Kafka client.
-- The dataset is synthetically generated.
-- Explanation mapping currently covers only a subset of engineered features.
-- Model retraining is offline; online learning is not implemented.
-
----
-
-## License
-
-Developed as part of IIT Bombay Summer of Code 2026.
+*AnomX SOC 2026 | Final Project | ForexGuard Prototype*
